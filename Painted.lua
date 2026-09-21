@@ -127,6 +127,7 @@ local config = {
     BrianasJoker = true,
     restlessFeetJoker = true,
     matchingSocksJoker = true,
+    pennyLoafersJoker = true,
         --tarots
     luckyduplicate = true,
     duplicateFeet = true,
@@ -15723,6 +15724,79 @@ if config.matchingSocksJoker then
                 card_eval_status_text(self, "extra", nil, nil, nil, {
                     message = "Reset!",
                     colour = G.C.FILTER
+                })
+            end
+        end
+    end
+end
+
+----------------------------------------------
+--------- PENNY LOAFERS ----------------------
+----------------------------------------------
+if config.pennyLoafersJoker then
+    local penny_loafers = {
+        loc = {
+            name = "Penny Loafers",
+            text = {
+                "{C:money}+$#1#{} when a card is",
+                "{C:attention}drawn{} to hand",
+                "{C:money}-$#1#{} when a card is {C:attention}discarded{}",
+                "{C:inactive}(Money cannot drop below {C:money}$0{C:inactive})"
+            }
+        },
+        px = 142,
+        py = 190,
+        ability_name = "Penny Loafers",
+        slug = "j_penny_loafers",
+        ability = {
+            name = "Penny Loafers",
+            set = "Joker",
+            extra = {
+                dollars = 1,
+            }
+        },
+        rarity = 2, -- Uncommon
+        cost = 6,
+        set = "Feet Joker",
+        unlocked = true,
+        discovered = true,
+        blueprint_compat = true,
+        eternal_compat = true,
+    }
+
+    init_joker(penny_loafers)
+
+    function SMODS.Jokers.j_penny_loafers.loc_def(card)
+        return { card.ability.extra.dollars }
+    end
+
+    -- Both sides pay instantly rather than through the usual queued ease, so
+    -- that G.GAME.dollars is already current when the next card in the same
+    -- discard is charged. Left queued, five cards discarded out of a $2 pocket
+    -- would each read $2, each charge a dollar, and land the player at -$3.
+    SMODS.Jokers.j_penny_loafers.calculate = function(self, context)
+        -- Paid on the way in.
+        if context.painted_card_drawn then
+            local gain = self.ability.extra.dollars
+            if gain > 0 then
+                ease_dollars(gain, true)
+                self:juice_up(0.3, 0.4)
+                card_eval_status_text(self, "extra", nil, nil, nil, {
+                    message = "+$" .. gain,
+                    colour = G.C.MONEY
+                })
+            end
+        end
+
+        -- Charged on the way out, down to an empty pocket and no further.
+        if context.discard and context.other_card then
+            local loss = math.min(self.ability.extra.dollars, G.GAME.dollars or 0)
+            if loss > 0 then
+                ease_dollars(-loss, true)
+                self:juice_up(0.3, 0.4)
+                card_eval_status_text(self, "extra", nil, nil, nil, {
+                    message = "-$" .. loss,
+                    colour = G.C.RED
                 })
             end
         end
