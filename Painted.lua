@@ -15620,17 +15620,6 @@ function CardArea:emplace(card, location, stay_flipped)
     end
 end
 
--- Playing cards hold no permanent Mult of their own the way they hold
--- perma_bonus Chips, so Mult handed out by the mechanic rides in
--- ability.painted_draw_mult, which Card:save keeps, and is added back when the
--- card scores.
-local painted_get_chip_mult_ref = Card.get_chip_mult
-function Card:get_chip_mult()
-    local mult = painted_get_chip_mult_ref(self) or 0
-    if self.debuff then return mult end
-    return mult + (self.ability.painted_draw_mult or 0)
-end
-
 ----------------------------------------------
 --------- MATCHING SOCKS ---------------------
 ----------------------------------------------
@@ -15639,10 +15628,11 @@ if config.matchingSocksJoker then
         loc = {
             name = "Matching Socks",
             text = {
-                "When a card is {C:attention}drawn{} to hand,",
-                "it permanently gains {C:mult}+#1#{} Mult for each",
-                "card of the same {C:attention}suit{} already in hand",
-                "{C:inactive}(Also triggers in Tarot and Spectral packs)"
+                "When a card is {C:attention}drawn{} to hand, this",
+                "gains {C:mult}+#1#{} Mult for each card of the",
+                "same {C:attention}suit{} already in your hand",
+                "{C:inactive}(Resets at end of round)",
+                "{C:inactive}Currently {C:mult}+#2#{C:inactive} Mult"
             }
         },
         px = 142,
@@ -15654,6 +15644,7 @@ if config.matchingSocksJoker then
             set = "Joker",
             extra = {
                 mult_per_card = 1,
+                mult = 0,
             }
         },
         rarity = 3, -- Rare
@@ -15668,35 +15659,73 @@ if config.matchingSocksJoker then
     init_joker(matching_socks)
 
     function SMODS.Jokers.j_matching_socks.loc_def(card)
-        return { card.ability.extra.mult_per_card }
+        return { card.ability.extra.mult_per_card, card.ability.extra.mult }
+    end
+
+    -- A Stone Card carries no suit, and a debuffed card carries nothing at all.
+    local function socks_has_suit(card)
+        return card and card.base and card.base.suit and card.ability
+            and not card.debuff and card.ability.effect ~= 'Stone Card'
+    end
+
+    -- Two cards match when either one answers to the other's suit. Asking in
+    -- both directions is what makes a wild card count: is_suit says yes to
+    -- every suit for one, whichever side of the comparison it lands on, so a
+    -- drawn wild matches the whole hand and a wild sitting in hand matches
+    -- whatever arrives. Wild Soles turns cards wild the same way, and Smeared
+    -- Joker's pairing of Hearts with Diamonds and Clubs with Spades rides
+    -- along inside is_suit too.
+    local function socks_suits_match(a, b)
+        if not (socks_has_suit(a) and socks_has_suit(b)) then return false end
+        if a:is_suit(b.base.suit) then return true end
+        if b:is_suit(a.base.suit) then return true end
+        return false
     end
 
     SMODS.Jokers.j_matching_socks.calculate = function(self, context)
-        if not context.painted_card_drawn then return end
-
-        local drawn = context.drawn_card
-        if not (drawn and drawn.base) then return end
-        -- Stone Cards and debuffed cards answer false to every suit, which
-        -- drops them out of both the payout and the count below.
-        if drawn.debuff or not drawn:is_suit(drawn.base.suit) then return end
-
-        local matches = 0
-        for _, other in ipairs(context.hand_before or {}) do
-            if other ~= drawn and other.base and not other.debuff and other:is_suit(drawn.base.suit) then
-                matches = matches + 1
+        -- Count the hand as the card lands in it.
+        if context.painted_card_drawn then
+            local drawn = context.drawn_card
+            local matches = 0
+            for _, other in ipairs(context.hand_before or {}) do
+                if other ~= drawn and socks_suits_match(drawn, other) then
+                    matches = matches + 1
+                end
+            end
+            if matches > 0 then
+                local gain = matches * self.ability.extra.mult_per_card
+                self.ability.extra.mult = self.ability.extra.mult + gain
+                self:juice_up(0.3, 0.4)
+                card_eval_status_text(self, "extra", nil, nil, nil, {
+                    message = "+" .. gain .. " Mult",
+                    colour = G.C.MULT
+                })
             end
         end
-        if matches <= 0 then return end
 
-        local gain = matches * self.ability.extra.mult_per_card
-        drawn.ability.painted_draw_mult = (drawn.ability.painted_draw_mult or 0) + gain
+        -- Hand it to the score.
+        if context.joker_main and self.ability.extra.mult > 0 then
+            return {
+                message = localize {
+                    type = "variable",
+                    key = "a_mult",
+                    vars = { self.ability.extra.mult }
+                },
+                mult_mod = self.ability.extra.mult,
+                card = self
+            }
+        end
 
-        self:juice_up(0.3, 0.4)
-        drawn:juice_up(0.3, 0.4)
-        card_eval_status_text(drawn, 'extra', nil, nil, nil, {
-            message = localize { type = 'variable', key = 'a_mult', vars = { gain } },
-            colour = G.C.MULT
-        })
+        -- Blind's over, socks come off.
+        if context.end_of_round and not context.individual and not context.repetition then
+            if self.ability.extra.mult > 0 then
+                self.ability.extra.mult = 0
+                card_eval_status_text(self, "extra", nil, nil, nil, {
+                    message = "Reset!",
+                    colour = G.C.FILTER
+                })
+            end
+        end
     end
 end
 
