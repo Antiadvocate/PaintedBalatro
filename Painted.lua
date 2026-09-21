@@ -126,6 +126,7 @@ local config = {
     KristinsJoker = true,
     BrianasJoker = true,
     restlessFeetJoker = true,
+    matchingSocksJoker = true,
         --tarots
     luckyduplicate = true,
     duplicateFeet = true,
@@ -15530,6 +15531,175 @@ function loc_colour(_c, _default)
     G.ARGS.LOC_COLOURS["mikas"] = HEX("FD5DA8")
     return G.ARGS.LOC_COLOURS[_c] or _default or G.C.UI.TEXT_DARK
 end
+
+----------------------------------------------
+--------- DRAWN TO HAND MECHANIC -------------
+----------------------------------------------
+-- The game has no trigger for "a card entered your hand", so this builds one.
+-- Every Joker gets a calculate() call carrying:
+--   context.painted_card_drawn = true
+--   context.drawn_card         = the Card that just landed in G.hand
+--   context.hand_before        = the cards already sitting in hand
+--   context.drawn_from         = the CardArea it came from, where known
+--
+-- A card reaches the hand by two routes: draw_card told which card to move,
+-- which emplaces that card itself, and draw_card told only which area to pull
+-- from, which hands off to CardArea:draw_card_from. Both are marked below, and
+-- CardArea:emplace fires the trigger only on a marked arrival.
+--
+-- That covers the opening deal, every redraw after a play or a discard, The
+-- Serpent's three, a hand size raised mid-round, and the hand dealt for Arcana
+-- and Spectral packs. It leaves out the copies DNA and Cryptid put straight
+-- into your hand, which the game already reports as playing_card_added, and
+-- the hand a saved run restores, which CardArea:load writes into the area
+-- without going through emplace at all.
+
+local painted_drawing_to_hand = nil
+local painted_dispatching_draw = false
+
+local function painted_dispatch_card_drawn(drawn, hand_before, from)
+    if painted_dispatching_draw then return end
+    if not (G.jokers and G.jokers.cards) then return end
+
+    painted_dispatching_draw = true
+    local context = {
+        painted_card_drawn = true,
+        drawn_card = drawn,
+        hand_before = hand_before,
+        drawn_from = from,
+    }
+    for i = 1, #G.jokers.cards do
+        local joker = G.jokers.cards[i]
+        local effect = joker:calculate_joker(context)
+        if effect and effect.message then
+            card_eval_status_text(effect.card or joker, 'extra', nil, nil, nil, effect)
+        end
+    end
+    painted_dispatching_draw = false
+end
+
+-- Route 1: a named card, emplaced by draw_card itself.
+local painted_draw_card_ref = draw_card
+function draw_card(from, to, percent, dir, sort, card, delay, mute, stay_flipped, vol, discarded_only)
+    if card and G.hand and to == G.hand then
+        card.painted_drawn_from = from or true
+    end
+    return painted_draw_card_ref(from, to, percent, dir, sort, card, delay, mute, stay_flipped, vol, discarded_only)
+end
+
+-- Route 2: a source area, with the card picked inside draw_card_from.
+local painted_draw_card_from_ref = CardArea.draw_card_from
+function CardArea:draw_card_from(area, stay_flipped, discarded_only)
+    if not (G.hand and self == G.hand) then
+        return painted_draw_card_from_ref(self, area, stay_flipped, discarded_only)
+    end
+    local outer = painted_drawing_to_hand
+    painted_drawing_to_hand = area or true
+    local drew = painted_draw_card_from_ref(self, area, stay_flipped, discarded_only)
+    painted_drawing_to_hand = outer
+    return drew
+end
+
+local painted_emplace_ref = CardArea.emplace
+function CardArea:emplace(card, location, stay_flipped)
+    local from, hand_before = nil, nil
+
+    if card and G.hand and self == G.hand and card.base and card.base.suit then
+        from = painted_drawing_to_hand or card.painted_drawn_from
+        if from then
+            hand_before = {}
+            for i = 1, #self.cards do hand_before[i] = self.cards[i] end
+        end
+    end
+    if card then card.painted_drawn_from = nil end
+
+    painted_emplace_ref(self, card, location, stay_flipped)
+
+    if from then
+        painted_dispatch_card_drawn(card, hand_before, from ~= true and from or nil)
+    end
+end
+
+-- Playing cards hold no permanent Mult of their own the way they hold
+-- perma_bonus Chips, so Mult handed out by the mechanic rides in
+-- ability.painted_draw_mult, which Card:save keeps, and is added back when the
+-- card scores.
+local painted_get_chip_mult_ref = Card.get_chip_mult
+function Card:get_chip_mult()
+    local mult = painted_get_chip_mult_ref(self) or 0
+    if self.debuff then return mult end
+    return mult + (self.ability.painted_draw_mult or 0)
+end
+
+----------------------------------------------
+--------- MATCHING SOCKS ---------------------
+----------------------------------------------
+if config.matchingSocksJoker then
+    local matching_socks = {
+        loc = {
+            name = "Matching Socks",
+            text = {
+                "When a card is {C:attention}drawn{} to hand,",
+                "it permanently gains {C:mult}+#1#{} Mult for each",
+                "card of the same {C:attention}suit{} already in hand",
+                "{C:inactive}(Also triggers in Tarot and Spectral packs)"
+            }
+        },
+        px = 142,
+        py = 190,
+        ability_name = "Matching Socks",
+        slug = "j_matching_socks",
+        ability = {
+            name = "Matching Socks",
+            set = "Joker",
+            extra = {
+                mult_per_card = 1,
+            }
+        },
+        rarity = 3, -- Rare
+        cost = 8,
+        set = "Feet Joker",
+        unlocked = true,
+        discovered = true,
+        blueprint_compat = true,
+        eternal_compat = true,
+    }
+
+    init_joker(matching_socks)
+
+    function SMODS.Jokers.j_matching_socks.loc_def(card)
+        return { card.ability.extra.mult_per_card }
+    end
+
+    SMODS.Jokers.j_matching_socks.calculate = function(self, context)
+        if not context.painted_card_drawn then return end
+
+        local drawn = context.drawn_card
+        if not (drawn and drawn.base) then return end
+        -- Stone Cards and debuffed cards answer false to every suit, which
+        -- drops them out of both the payout and the count below.
+        if drawn.debuff or not drawn:is_suit(drawn.base.suit) then return end
+
+        local matches = 0
+        for _, other in ipairs(context.hand_before or {}) do
+            if other ~= drawn and other.base and not other.debuff and other:is_suit(drawn.base.suit) then
+                matches = matches + 1
+            end
+        end
+        if matches <= 0 then return end
+
+        local gain = matches * self.ability.extra.mult_per_card
+        drawn.ability.painted_draw_mult = (drawn.ability.painted_draw_mult or 0) + gain
+
+        self:juice_up(0.3, 0.4)
+        drawn:juice_up(0.3, 0.4)
+        card_eval_status_text(drawn, 'extra', nil, nil, nil, {
+            message = localize { type = 'variable', key = 'a_mult', vars = { gain } },
+            colour = G.C.MULT
+        })
+    end
+end
+
 
 ----------------------------------------------
 ------------ SPEED & FF LOGIC ----------------
