@@ -15535,26 +15535,38 @@ end
 ----------------------------------------------
 --------- DRAWN TO HAND MECHANIC -------------
 ----------------------------------------------
--- Balatro ships no trigger for "a card entered your hand", so this builds one.
+-- The game has no trigger for "a card entered your hand", so this builds one.
 -- Every Joker gets a calculate() call carrying:
 --   context.painted_card_drawn = true
 --   context.drawn_card         = the Card that just landed in G.hand
---   context.hand_before        = the cards that were already sitting in hand
--- It fires on the opening deal, on every redraw after a play or a discard, and
--- on the hand dealt for Arcana and Spectral packs, since all of those routes
--- end in CardArea:emplace on G.hand.
+--   context.hand_before        = the cards already sitting in hand
+--   context.drawn_from         = the CardArea it came from, where known
+--
+-- A card reaches the hand by two routes: draw_card told which card to move,
+-- which emplaces that card itself, and draw_card told only which area to pull
+-- from, which hands off to CardArea:draw_card_from. Both are marked below, and
+-- CardArea:emplace fires the trigger only on a marked arrival.
+--
+-- That covers the opening deal, every redraw after a play or a discard, The
+-- Serpent's three, a hand size raised mid-round, and the hand dealt for Arcana
+-- and Spectral packs. It leaves out the copies DNA and Cryptid put straight
+-- into your hand, which the game already reports as playing_card_added, and
+-- the hand a saved run restores, which CardArea:load writes into the area
+-- without going through emplace at all.
 
-local painted_draw_dispatching = false
+local painted_drawing_to_hand = nil
+local painted_dispatching_draw = false
 
-local function painted_dispatch_card_drawn(drawn, hand_before)
-    if painted_draw_dispatching then return end
+local function painted_dispatch_card_drawn(drawn, hand_before, from)
+    if painted_dispatching_draw then return end
     if not (G.jokers and G.jokers.cards) then return end
 
-    painted_draw_dispatching = true
+    painted_dispatching_draw = true
     local context = {
         painted_card_drawn = true,
         drawn_card = drawn,
         hand_before = hand_before,
+        drawn_from = from,
     }
     for i = 1, #G.jokers.cards do
         local joker = G.jokers.cards[i]
@@ -15563,41 +15575,55 @@ local function painted_dispatch_card_drawn(drawn, hand_before)
             card_eval_status_text(effect.card or joker, 'extra', nil, nil, nil, effect)
         end
     end
-    painted_draw_dispatching = false
+    painted_dispatching_draw = false
+end
+
+-- Route 1: a named card, emplaced by draw_card itself.
+local painted_draw_card_ref = draw_card
+function draw_card(from, to, percent, dir, sort, card, delay, mute, stay_flipped, vol, discarded_only)
+    if card and G.hand and to == G.hand then
+        card.painted_drawn_from = from or true
+    end
+    return painted_draw_card_ref(from, to, percent, dir, sort, card, delay, mute, stay_flipped, vol, discarded_only)
+end
+
+-- Route 2: a source area, with the card picked inside draw_card_from.
+local painted_draw_card_from_ref = CardArea.draw_card_from
+function CardArea:draw_card_from(area, stay_flipped, discarded_only)
+    if not (G.hand and self == G.hand) then
+        return painted_draw_card_from_ref(self, area, stay_flipped, discarded_only)
+    end
+    local outer = painted_drawing_to_hand
+    painted_drawing_to_hand = area or true
+    local drew = painted_draw_card_from_ref(self, area, stay_flipped, discarded_only)
+    painted_drawing_to_hand = outer
+    return drew
 end
 
 local painted_emplace_ref = CardArea.emplace
 function CardArea:emplace(card, location, stay_flipped)
-    local drawn_to_hand = false
-    local hand_before = nil
+    local from, hand_before = nil, nil
 
-    if card and card.ability and card.base and card.base.suit then
-        if G.hand and self == G.hand then
-            -- A card that already counts as in-hand is being re-ordered by the
-            -- player's mouse, so it must not pay out a second time. The flag
-            -- lives on ability so it survives a save, which stops a loaded run
-            -- from re-triggering on the hand it was saved with.
-            if not card.ability.painted_in_hand and not (card.states and card.states.drag and card.states.drag.is) then
-                drawn_to_hand = true
-                hand_before = {}
-                for i = 1, #self.cards do hand_before[i] = self.cards[i] end
-            end
-            card.ability.painted_in_hand = true
-        else
-            card.ability.painted_in_hand = nil
+    if card and G.hand and self == G.hand and card.base and card.base.suit then
+        from = painted_drawing_to_hand or card.painted_drawn_from
+        if from then
+            hand_before = {}
+            for i = 1, #self.cards do hand_before[i] = self.cards[i] end
         end
     end
+    if card then card.painted_drawn_from = nil end
 
     painted_emplace_ref(self, card, location, stay_flipped)
 
-    if drawn_to_hand then
-        painted_dispatch_card_drawn(card, hand_before)
+    if from then
+        painted_dispatch_card_drawn(card, hand_before, from ~= true and from or nil)
     end
 end
 
--- Playing cards hold no permanent Mult of their own here the way they hold
+-- Playing cards hold no permanent Mult of their own the way they hold
 -- perma_bonus Chips, so Mult handed out by the mechanic rides in
--- ability.painted_draw_mult and is added back when the card scores.
+-- ability.painted_draw_mult, which Card:save keeps, and is added back when the
+-- card scores.
 local painted_get_chip_mult_ref = Card.get_chip_mult
 function Card:get_chip_mult()
     local mult = painted_get_chip_mult_ref(self) or 0
