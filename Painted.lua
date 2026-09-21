@@ -126,6 +126,7 @@ local config = {
     KristinsJoker = true,
     BrianasJoker = true,
     restlessFeetJoker = true,
+    matchingSocksJoker = true,
         --tarots
     luckyduplicate = true,
     duplicateFeet = true,
@@ -15530,6 +15531,149 @@ function loc_colour(_c, _default)
     G.ARGS.LOC_COLOURS["mikas"] = HEX("FD5DA8")
     return G.ARGS.LOC_COLOURS[_c] or _default or G.C.UI.TEXT_DARK
 end
+
+----------------------------------------------
+--------- DRAWN TO HAND MECHANIC -------------
+----------------------------------------------
+-- Balatro ships no trigger for "a card entered your hand", so this builds one.
+-- Every Joker gets a calculate() call carrying:
+--   context.painted_card_drawn = true
+--   context.drawn_card         = the Card that just landed in G.hand
+--   context.hand_before        = the cards that were already sitting in hand
+-- It fires on the opening deal, on every redraw after a play or a discard, and
+-- on the hand dealt for Arcana and Spectral packs, since all of those routes
+-- end in CardArea:emplace on G.hand.
+
+local painted_draw_dispatching = false
+
+local function painted_dispatch_card_drawn(drawn, hand_before)
+    if painted_draw_dispatching then return end
+    if not (G.jokers and G.jokers.cards) then return end
+
+    painted_draw_dispatching = true
+    local context = {
+        painted_card_drawn = true,
+        drawn_card = drawn,
+        hand_before = hand_before,
+    }
+    for i = 1, #G.jokers.cards do
+        local joker = G.jokers.cards[i]
+        local effect = joker:calculate_joker(context)
+        if effect and effect.message then
+            card_eval_status_text(effect.card or joker, 'extra', nil, nil, nil, effect)
+        end
+    end
+    painted_draw_dispatching = false
+end
+
+local painted_emplace_ref = CardArea.emplace
+function CardArea:emplace(card, location, stay_flipped)
+    local drawn_to_hand = false
+    local hand_before = nil
+
+    if card and card.ability and card.base and card.base.suit then
+        if G.hand and self == G.hand then
+            -- A card that already counts as in-hand is being re-ordered by the
+            -- player's mouse, so it must not pay out a second time. The flag
+            -- lives on ability so it survives a save, which stops a loaded run
+            -- from re-triggering on the hand it was saved with.
+            if not card.ability.painted_in_hand and not (card.states and card.states.drag and card.states.drag.is) then
+                drawn_to_hand = true
+                hand_before = {}
+                for i = 1, #self.cards do hand_before[i] = self.cards[i] end
+            end
+            card.ability.painted_in_hand = true
+        else
+            card.ability.painted_in_hand = nil
+        end
+    end
+
+    painted_emplace_ref(self, card, location, stay_flipped)
+
+    if drawn_to_hand then
+        painted_dispatch_card_drawn(card, hand_before)
+    end
+end
+
+-- Playing cards hold no permanent Mult of their own here the way they hold
+-- perma_bonus Chips, so Mult handed out by the mechanic rides in
+-- ability.painted_draw_mult and is added back when the card scores.
+local painted_get_chip_mult_ref = Card.get_chip_mult
+function Card:get_chip_mult()
+    local mult = painted_get_chip_mult_ref(self) or 0
+    if self.debuff then return mult end
+    return mult + (self.ability.painted_draw_mult or 0)
+end
+
+----------------------------------------------
+--------- MATCHING SOCKS ---------------------
+----------------------------------------------
+if config.matchingSocksJoker then
+    local matching_socks = {
+        loc = {
+            name = "Matching Socks",
+            text = {
+                "When a card is {C:attention}drawn{} to hand,",
+                "it permanently gains {C:mult}+#1#{} Mult for each",
+                "card of the same {C:attention}suit{} already in hand",
+                "{C:inactive}(Also triggers in Tarot and Spectral packs)"
+            }
+        },
+        px = 142,
+        py = 190,
+        ability_name = "Matching Socks",
+        slug = "j_matching_socks",
+        ability = {
+            name = "Matching Socks",
+            set = "Joker",
+            extra = {
+                mult_per_card = 1,
+            }
+        },
+        rarity = 3, -- Rare
+        cost = 8,
+        set = "Feet Joker",
+        unlocked = true,
+        discovered = true,
+        blueprint_compat = true,
+        eternal_compat = true,
+    }
+
+    init_joker(matching_socks)
+
+    function SMODS.Jokers.j_matching_socks.loc_def(card)
+        return { card.ability.extra.mult_per_card }
+    end
+
+    SMODS.Jokers.j_matching_socks.calculate = function(self, context)
+        if not context.painted_card_drawn then return end
+
+        local drawn = context.drawn_card
+        if not (drawn and drawn.base) then return end
+        -- Stone Cards and debuffed cards answer false to every suit, which
+        -- drops them out of both the payout and the count below.
+        if drawn.debuff or not drawn:is_suit(drawn.base.suit) then return end
+
+        local matches = 0
+        for _, other in ipairs(context.hand_before or {}) do
+            if other ~= drawn and other.base and not other.debuff and other:is_suit(drawn.base.suit) then
+                matches = matches + 1
+            end
+        end
+        if matches <= 0 then return end
+
+        local gain = matches * self.ability.extra.mult_per_card
+        drawn.ability.painted_draw_mult = (drawn.ability.painted_draw_mult or 0) + gain
+
+        self:juice_up(0.3, 0.4)
+        drawn:juice_up(0.3, 0.4)
+        card_eval_status_text(drawn, 'extra', nil, nil, nil, {
+            message = localize { type = 'variable', key = 'a_mult', vars = { gain } },
+            colour = G.C.MULT
+        })
+    end
+end
+
 
 ----------------------------------------------
 ------------ SPEED & FF LOGIC ----------------
